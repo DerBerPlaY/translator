@@ -1,182 +1,237 @@
-import urllib.parse
-import urllib.request
-from kivy.app import App
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
-from kivy.uix.dropdown import DropDown
-from kivy.uix.label import Label
-from kivy.uix.textinput import TextInput
-from natasha import MorphVocab, NewsEmbedding, NewsMorphTagger
+import flet as ft
+from pymorphy2 import MorphAnalyzer
+from rapidfuzz import process
+import os
+import json
+from rapidfuzz import process
 
+def find_component(self, lemmas, dictionary):
+    for lemma in lemmas:
+        if lemma in dictionary:
+            return {'ru': lemma, 'en': dictionary[lemma]}
+        # Попробуем найти ближайшее совпадение
+        match = process.extractOne(lemma, dictionary.keys(), score_cutoff=80)
+        if match:
+            best_match = match[0]
+            return {'ru': best_match, 'en': dictionary[best_match]}
+    return None
 
-# Инициализация морфологического словаря и теггера
-morph_vocab = MorphVocab()
-emb = NewsEmbedding()
-morph_tagger = NewsMorphTagger(emb)
+import flet as ft
 
+class DictionaryManager:
+    def __init__(self):
+        self.nouns = self.load_dictionary("nouns.json")
+        self.verbs = self.load_dictionary("verbs.json")
+        self.pronouns = self.load_dictionary("pronouns.json")
+        self.irregular_verbs = self.load_dictionary("irregular_verbs.json")
 
-tobe = ["am", "are", "is", "is", "is", "are"]
-do_does = ["do", "do", "does", "does", "does", "do"]
+    @staticmethod
+    def load_dictionary(file_name):
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        data_path = os.path.join(base_path, "data", file_name)
+        with open(data_path, "r", encoding="utf-8") as f:
+            return json.load(f)
 
+class GrammarRules:
+    def __init__(self, dictionaries):
+        self.dicts = dictionaries
+        self.tobe = ["am", "are", "is", "is", "is", "are"]
+        self.do_does = ["do", "do", "does", "does", "does", "do"]
+        self.definite_nouns = set(["cinema", "school", "beach", "hospital", "university", "park"])  # can expand
 
-nouns_ru = ([str(x)[:-1] for x in open('nouns_ru.txt')])
-nouns_en = ([str(x)[:-1] for x in open('nouns_en.txt')])
-verbs_ru = ([str(x)[:-1] for x in open('verbs_ru.txt')])
-verbs_en = ([str(x)[:-1] for x in open('verbs_en.txt')])
-pronouns_ru = ([str(x)[:-1] for x in open('pronouns_ru.txt')])
-pronouns_en = ([str(x)[:-1] for x in open('pronouns_en.txt')])
+    def get_pronoun_index(self, pronoun):
+        pronouns_ru = list(self.dicts.pronouns.keys())
+        return pronouns_ru.index(pronoun) if pronoun in pronouns_ru else 2
 
+    def get_verb_form(self, verb, tense):
+        if verb in self.dicts.irregular_verbs:
+            return self.dicts.irregular_verbs[verb].get(tense, f"{verb}ed")
+        return f"{verb}ed" if tense == "past" else verb
 
-def translate_ru_to_en(text_input, time):
-    print(text_input)
+    def add_article(self, noun):
+        if noun in self.definite_nouns:
+            return f"the {noun}"
+        if noun.endswith('s'):  # plural forms
+            return noun
+        article = "an" if noun[0].lower() in "aeiou" else "a"
+        return f"{article} {noun}"
 
+class Translator:
+    def __init__(self, dictionaries, grammar):
+        self.morph = MorphAnalyzer()
+        self.dicts = dictionaries
+        self.grammar = grammar
+        self.question_words = {
+            "что": "what",
+            "кто": "who",
+            "где": "where",
+            "почему": "why",
+            "когда": "when",
+            "как": "how"
+        }
 
-    noun_en = ""
-    noun_ru = ""
-    verb_en = ""
-    verb_ru = ""
-    pronoun_en = ""
-    pronoun_ru = ""
-    to_be = ""
-    to_do = ""
+    def lemmatize(self, text):
+        return [self.morph.parse(word)[0].normal_form for word in text.split()]
 
+    def translate_sentence(self, text, tense):
+        lemmas = self.lemmatize(text)
 
-    text = text_input.split()
-    text = [text[x].lower() for x in range(0, len(text))]
-    text = lemmatize_text(' '.join(text))
+        question_word = next((self.question_words[w] for w in self.question_words if w in text.lower()), None)
 
+        components = {
+            'pronoun': self.find_component(lemmas, self.dicts.pronouns),
+            'verb': self.find_component(lemmas, self.dicts.verbs),
+            'noun': self.find_component(lemmas, self.dicts.nouns)
+        }
 
-    print(text)
+        if not all(components.values()):
+            return "Translation error: missing components"
 
+        return self.build_sentence(components, tense, text, question_word)
 
-    for i in range(0, len(nouns_en)):
-        if nouns_ru[i] in text:
-            noun_en = nouns_en[i]
-            noun_ru = nouns_ru[i]
+    def find_component(self, lemmas, dictionary):
+        for lemma in lemmas:
+            if lemma in dictionary:
+                return {'ru': lemma, 'en': dictionary[lemma]}
+            match = process.extractOne(lemma, dictionary.keys(), score_cutoff=80)
+            if match:
+                best_match = match[0]
+                return {'ru': best_match, 'en': dictionary[best_match]}
+        return None
 
+    def build_sentence(self, components, tense, original_text, question_word):
+        pronoun = components['pronoun']['en']
+        verb = components['verb']['en']
+        noun_raw = components['noun']['en']
+        noun = self.grammar.add_article(noun_raw)
 
-    if noun_en == "": return "Missing noun"
-    if noun_ru == "": return "Missing noun"
+        p_index = self.grammar.get_pronoun_index(components['pronoun']['ru'])
+        to_be = self.grammar.tobe[p_index]
+        to_do = self.grammar.do_does[p_index]
 
+        question = '?' in original_text or question_word is not None
+        negative = any(word in original_text.lower() for word in ['не', 'нет'])
 
-    for i in range(0, len(pronouns_en)):
-        if pronouns_ru[i] in text:
-            pronoun_en = pronouns_en[i]
-            pronoun_ru = pronouns_ru[i]
-            to_be = tobe[i]
-            to_do = do_does[i]
-    if pronoun_en == "": return "Missing pronoun"
-    if pronoun_ru == "": return "Missing pronoun"
+        tense_map = {
+            'past': self.handle_past_tense,
+            'present': self.handle_present_tense,
+            'future': self.handle_future_tense
+        }
 
+        return tense_map[tense](pronoun, verb, noun, to_be, to_do, question, negative, question_word)
 
-    for i in range(0, len(verbs_en)):
-        if verbs_ru[i] in text:
-            verb_en = verbs_en[i]
-            verb_ru = verbs_ru[i]
+    def handle_past_tense(self, pronoun, verb, noun, _, __, question, negative, question_word):
+        verb_form = self.grammar.get_verb_form(verb, "past")
+        base = f"{pronoun} {verb_form} {noun}"
 
+        if negative:
+            return f"{pronoun} didn't {verb} {noun}".capitalize()
+        if question:
+            if question_word:
+                return f"{question_word.capitalize()} did {pronoun} {verb} {noun}?"
+            return f"Did {pronoun} {verb} {noun}?".capitalize()
+        return base.capitalize()
 
-    verb_ru = morph_vocab.lemmatize(verb_ru)[0]
-    if verb_en == "": return "Missing verb"
-    if verb_ru == "": return "Missing verb"
+    def handle_present_tense(self, pronoun, verb, noun, to_be, to_do, question, negative, question_word):
+        if negative:
+            return f"{pronoun} {to_do}n't {verb} {noun}".capitalize()
+        if question:
+            if question_word:
+                return f"{question_word.capitalize()} {to_do} {pronoun} {verb} {noun}?"
+            return f"{to_do.capitalize()} {pronoun} {verb} {noun}?"
+        return f"{pronoun} {verb} {noun}".capitalize()
 
+    def handle_future_tense(self, pronoun, verb, noun, _, __, question, negative, question_word):
+        base = f"{pronoun} will {verb} {noun}"
+        if negative:
+            return f"{pronoun} won't {verb} {noun}".capitalize()
+        if question:
+            if question_word:
+                return f"{question_word.capitalize()} will {pronoun} {verb} {noun}?"
+            return f"Will {pronoun} {verb} {noun}?".capitalize()
+        return base.capitalize()
 
-    question = 0
-    deny = 0
+class TranslatorApp:
+    def __init__(self, page: ft.Page):
+        self.page = page
+        self.page.title = "Русско-Английский Переводчик"
+        self.output_field = ft.Text()
 
-
-    if (text_input[-1] == '?'):
-        question = 1
-    if ("не" in text):
-        deny = 1
-
-
-    if (deny == 1):
-        if (time == 1):
-            return((pronoun_en + " didn't " + verb_en + " to the " + noun_en).capitalize())
-        if (time == 2):
-            return((pronoun_en + " " + to_do + "n't" + " " + verb_en + " to the " + noun_en).capitalize())
-        if (time == 3):
-            return((pronoun_en + " won't " + verb_en + " to the " + noun_en).capitalize())
-    if (question == 1):
-        if (time == 1):
-            return(("had " + pronoun_en + " " + verb_en + "ed to the " + noun_en + "?").capitalize())
-        if (time == 2):
-            return((to_do + " " + pronoun_en + " " + verb_en + " to the " + noun_en + "?").capitalize())
-        if (time == 3):
-            return(("will " + pronoun_en + " " + verb_en + " to the " + noun_en + "?").capitalize())
-    if (time == 1):
-        return((pronoun_en + " " + verb_en + "ed to the " + noun_en).capitalize())
-    if (time == 2):
-        return((pronoun_en + " " + verb_en + " to the " + noun_en).capitalize())
-    if (time == 3):
-        return((pronoun_en + " will " + verb_en + " to the " + noun_en).capitalize())
-
-
-class TranslatorApp(App):
-    def build(self):
-        # Создаем основной контейнер
-        layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
-
-
-        # Создаем текстовое поле для ввода текста
-        self.input_text = TextInput(hint_text="Введите текст для перевода", size_hint=(1, None), height=40)
-        layout.add_widget(self.input_text)
-
-
-        # Создаем выпадающий список для выбора времени
-        self.dropdown = DropDown()
-        for time in ["Прошедшее", "Настоящее", "Будущее"]:
-            btn = Button(text=time, size_hint_y=None, height=40)
-            btn.bind(on_release=lambda btn: self.dropdown.select(btn.text))
-            self.dropdown.add_widget(btn)
-
-
-        self.time_button = Button(text="Выберите время", size_hint=(1, None), height=40)
-        self.time_button.bind(on_release=self.dropdown.open)
-        self.dropdown.bind(on_select=lambda instance, x: setattr(self.time_button, 'text', x))
-        layout.add_widget(self.time_button)
-
-
-        # Создаем кнопку для перевода
-        translate_button = Button(text="Перевести", size_hint=(1, None), height=40)
-        translate_button.bind(on_press=self.translate_text)
-        layout.add_widget(translate_button)
-
-
-        # Создаем метку для отображения переведенного текста
-        self.output_label = Label(text="Переведенный текст будет здесь", size_hint=(1, None), height=40)
-        layout.add_widget(self.output_label)
-
-
-        return layout
-
-
-    def translate_text(self, instance):
-        # Здесь должна быть ваша функция для перевода текста
-        # Например: translated_text = translate(self.input_text.text)
-        # Но мы оставим заглушку
-        input_text = self.input_text.text
-        time_text = self.time_button.text
-        time = 0
-        if time_text == "Прошедшее":
-            time = 1
-        elif time_text == "Настоящее":
-            time = 2
-        elif time_text == "Будущее":
-            time = 3
-
-
-        if time == 0:
-            self.output_label.text = "Возникла ошибка при выборе времени"
+        try:
+            self.dictionaries = DictionaryManager()
+            self.grammar = GrammarRules(self.dictionaries)
+            self.translator = Translator(self.dictionaries, self.grammar)
+        except Exception as e:
+            self.output_field.value = f"Ошибка инициализации: {str(e)}"
+            self.page.add(self.output_field)
+            self.page.update()
             return
 
+        self.setup_ui()
 
-        translated_text = translate_ru_to_en(input_text, time)
+    def setup_ui(self):
+        self.input_field = ft.TextField(
+            label="Введите текст на русском",
+            multiline=True,
+            text_size=18
+        )
 
+        self.time_dropdown = ft.Dropdown(
+            label="Выберите время",
+            options=[
+                ft.dropdown.Option("past", "Прошедшее"),
+                ft.dropdown.Option("present", "Настоящее"),
+                ft.dropdown.Option("future", "Будущее")
+            ],
+            text_size=18
+        )
 
-        # Обновляем метку с переведенным текстом
-        self.output_label.text = translated_text
+        self.translate_btn = ft.ElevatedButton(
+            text="Перевести",
+            on_click=self.translate_text,
+            height=50
+        )
 
+        self.output_field = ft.Text(
+            size=18,
+            text_align=ft.TextAlign.CENTER
+        )
 
-if __name__ == '__main__':
-    TranslatorApp().run()
+        self.page.add(
+            ft.Column(
+                controls=[
+                    self.input_field,
+                    self.time_dropdown,
+                    self.translate_btn,
+                    self.output_field
+                ],
+                spacing=15,
+                expand=True,
+                alignment=ft.MainAxisAlignment.CENTER
+            )
+        )
+
+    def translate_text(self, e):
+        text = self.input_field.value.strip()
+        tense = self.time_dropdown.value
+
+        if not text:
+            self.output_field.value = "Введите текст для перевода"
+            self.page.update()
+            return
+
+        if not tense:
+            self.output_field.value = "Выберите время!"
+            self.page.update()
+            return
+
+        try:
+            result = self.translator.translate_sentence(text.lower(), tense)
+            self.output_field.value = result
+        except Exception as ex:
+            self.output_field.value = f"Ошибка перевода: {str(ex)}"
+        finally:
+            self.page.update()
+
+if __name__ == "__main__":
+    ft.app(target=TranslatorApp, assets_dir="data")
